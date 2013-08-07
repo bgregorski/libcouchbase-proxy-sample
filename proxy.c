@@ -513,6 +513,7 @@ proxy_accept_callback(lcb_socket_t sock, short which, void *data)
     if (cl->event == NULL) {
         fail("failed to create event for client");
     }
+    info("[%p] connected", (void *)cl);
     io->v.v0.update_event(io, cl->sock, cl->event, LCB_READ_EVENT, cl,
                           proxy_client_callback);
 }
