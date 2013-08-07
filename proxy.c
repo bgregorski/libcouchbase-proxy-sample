@@ -99,20 +99,27 @@ scan_options(int argc, char *argv[])
     lcb_error_t err;
     int c;
 
+    /* initialize connection options */
     io_opts.version = 0;
+    /* use default IO backend from libcouchbase */
     io_opts.v.v0.type = LCB_IO_OPS_DEFAULT;
     io_opts.v.v0.cookie = NULL;
+    /* default proxy port */
     port = 1987;
+    /* initialize connection parameters, the address of the cluster,
+     * target bucket and credentials */
     opts.version = 0;
     opts.v.v0.host = "localhost:8091";
     opts.v.v0.bucket = "default";
     opts.v.v0.user = NULL;
     opts.v.v0.passwd = NULL;
 
+    /* create instance of IO backend */
     err = lcb_create_io_ops(&opts.v.v0.io, &io_opts);
     if (err != LCB_SUCCESS) {
         fail_e(err, "lcb_create_io_ops()");
     }
+    /* this sample designed to use first version of IO plugin layout */
     if (opts.v.v0.io->version != 0) {
         fail_e(err, "this application designed to use v0 IO layout");
     }
@@ -158,6 +165,7 @@ main(int argc, char *argv[])
     lcb_t conn = NULL;
 
     scan_options(argc, argv);
+    /* create connection handle */
     err = lcb_create(&conn, &opts);
     if (err != LCB_SUCCESS) {
         fail_e(err, "lcb_create()");
@@ -170,22 +178,34 @@ main(int argc, char *argv[])
     if (opts.v.v0.passwd) {
         info("\twith password \"%s\"", opts.v.v0.passwd);
     }
+    /* schedule connection of the handle */
     err = lcb_connect(conn);
     if (err != LCB_SUCCESS) {
         fail_e(err, "lcb_connect()");
     }
+    /* run event loop to actually connect to the server, fetch config
+     * and prepare data connections */
     err = lcb_wait(conn);
     if (err != LCB_SUCCESS) {
         fail_e(err, "lcb_connect()");
     }
 
+    /* setup and execute proxy. it will not return, so use SIGINT to
+     * interrupt the application */
     run_proxy(conn);
 
     return EXIT_SUCCESS;
 }
 
+/*
+ * the proxy implementation
+ */
+
+int id = 0;
+
 void proxy_client_callback(lcb_socket_t sock, short which, void *data);
 
+/* structure for proxy listening socket */
 typedef struct server_st server_t;
 struct server_st {
     lcb_t conn;
@@ -194,8 +214,11 @@ struct server_st {
     void *event;
 };
 
+/* structure for client sockets, the application will create separate
+ * instance for each accepted connection */
 typedef struct client_st client_t;
 struct client_st {
+    int id;
     server_t *server;
     int sock;
     ringbuffer_t in;
@@ -203,12 +226,18 @@ struct client_st {
     void *event;
 };
 
+/* the unique cookie, passed to each couchbase command. deallocated
+ * after handling response. needed to logically bind response and
+ * request */
 typedef struct cookie_st cookie_t;
 struct cookie_st {
     lcb_uint32_t opaque;
     client_t *client;
+    protocol_binary_command opcode;
 };
 
+/* this callback triggered when libcouchbase detects an error, but
+ * cannot associate it with specific request. e.g. network issues */
 void
 error_callback(lcb_t conn, lcb_error_t err, const char *info)
 {
@@ -216,7 +245,7 @@ error_callback(lcb_t conn, lcb_error_t err, const char *info)
     (void)conn;
 }
 
-
+/* libcouchbase error codes to memcached protocol */
 protocol_binary_response_status
 map_status(lcb_error_t err)
 {
@@ -258,6 +287,9 @@ map_status(lcb_error_t err)
     }
 }
 
+/* this callback called for each GET request. it transform response
+ * returned by libcouchbase to protocol packet and notify IO loop that
+ * the data in the buffer is ready to be sent to the network */
 void
 get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
              const lcb_get_resp_t *item)
@@ -272,7 +304,7 @@ get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
     res.message.header.response.keylen = 0;
     res.message.header.response.extlen = 4;
     res.message.header.response.datatype = item->v.v0.datatype;
-    res.message.header.response.status = map_status(err);
+    res.message.header.response.status = htons(map_status(err));
     res.message.header.response.bodylen = htonl(4 + item->v.v0.nbytes);
     res.message.header.response.opaque = c->opaque;
     res.message.header.response.cas = item->v.v0.cas;
@@ -280,12 +312,15 @@ get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
     ringbuffer_ensure_capacity(&cl->out, sizeof(res.bytes) + item->v.v0.nbytes);
     ringbuffer_write(&cl->out, res.bytes, sizeof(res.bytes));
     ringbuffer_write(&cl->out, item->v.v0.bytes, item->v.v0.nbytes);
-    io->v.v0.update_event(io, cl->sock, cl->event,
-                          LCB_WRITE_EVENT, cl,
-                          proxy_client_callback);
+    io->v.v0.update_event(io, cl->sock, cl->event, LCB_WRITE_EVENT,
+                          cl, proxy_client_callback);
+    free(c);
     (void)conn;
 }
 
+/* this callback called for each SET request. it transform response
+ * returned by libcouchbase to protocol packet and notify IO loop that
+ * the data in the buffer is ready to be sent to the network */
 void
 store_callback(lcb_t conn, const void *cookie,
                lcb_storage_t operation,
@@ -303,21 +338,29 @@ store_callback(lcb_t conn, const void *cookie,
     res.message.header.response.extlen = 0;
     /* lcb_store_resp_t doesn't carry datatype */
     res.message.header.response.datatype = PROTOCOL_BINARY_RAW_BYTES;
-    res.message.header.response.status = map_status(err);
+    res.message.header.response.status = htons(map_status(err));
     res.message.header.response.bodylen = 0;
     res.message.header.response.opaque = c->opaque;
     res.message.header.response.cas = item->v.v0.cas;
     ringbuffer_ensure_capacity(&cl->out, sizeof(res));
     ringbuffer_write(&cl->out, res.bytes, sizeof(res));
-    io->v.v0.update_event(io, cl->sock, cl->event,
-                          LCB_WRITE_EVENT, cl,
-                          proxy_client_callback);
+    io->v.v0.update_event(io, cl->sock, cl->event, LCB_WRITE_EVENT,
+                          cl, proxy_client_callback);
+    free(c);
+    /* ignore operation, because this application cannot generate
+     * other store requests to libcouchbase, like APPEND/REPLACE/etc.
+     */
     (void)operation;
     (void)conn;
 }
 
 char notsup_msg[] = "Not supported";
+char version_msg[] = "proxy/libcouchbase";
 
+/* this function is reading packet fields from byte stream, detects
+ * known commands and makes corresponding calls to libcouchbase. for
+ * all unknown commands it outputs response with code
+ * PROTOCOL_BINARY_RESPONSE_NOT_SUPPORTED */
 void
 handle_packet(client_t *cl, char *buf)
 {
@@ -339,13 +382,14 @@ handle_packet(client_t *cl, char *buf)
     }
     cookie->client = cl;
     cookie->opaque = req->request.opaque;
+    cookie->opcode = req->request.opcode;
     memset(&cmd, 0, sizeof(cmd));
     switch (req->request.opcode) {
     case PROTOCOL_BINARY_CMD_GET:
         cmds.get[0] = &cmd.get;
         cmd.get.v.v0.nkey = ntohs(req->request.keylen);
         cmd.get.v.v0.key = buf + sizeof(*req);
-        info("[%p] get \"%.*s\"", (void *)cl,
+        info("[%d] get \"%.*s\"", cl->id,
              (int)cmd.get.v.v0.nkey, (char *)cmd.get.v.v0.key);
         lcb_get(cl->server->conn, (const void*)cookie, 1, cmds.get);
         break;
@@ -362,13 +406,29 @@ handle_packet(client_t *cl, char *buf)
         cmd.set.v.v0.flags = ntohl(cmd.set.v.v0.flags);
         memcpy(&cmd.set.v.v0.exptime, buf + sizeof(*req) + 4, 4);
         cmd.set.v.v0.exptime = ntohl(cmd.set.v.v0.exptime);
-        info("[%p] set \"%.*s\"", (void *)cl,
+        info("[%d] set \"%.*s\"", cl->id,
              (int)cmd.set.v.v0.nkey, (char *)cmd.set.v.v0.key);
         lcb_store(cl->server->conn, (const void*)cookie, 1, cmds.set);
         break;
+    case PROTOCOL_BINARY_CMD_VERSION:
+        free(cookie);
+        info("[%d] version", cl->id);
+        res.response.magic = PROTOCOL_BINARY_RES;
+        res.response.opcode = req->request.opcode;
+        res.response.keylen = 0;
+        res.response.extlen = 0;
+        res.response.datatype = PROTOCOL_BINARY_RAW_BYTES;
+        res.response.status = PROTOCOL_BINARY_RESPONSE_SUCCESS;
+        res.response.bodylen = htonl(sizeof(version_msg));
+        res.response.opaque = req->request.opaque;
+        res.response.cas = 0;
+        ringbuffer_ensure_capacity(&cl->out, sizeof(res));
+        ringbuffer_write(&cl->out, res.bytes, sizeof(res));
+        ringbuffer_write(&cl->out, version_msg, sizeof(version_msg));
+        break;
     default:
         free(cookie);
-        info("[%p] not supported command", (void *)cl);
+        info("[%d] unsupported command: 0x%02x", cl->id, req->request.opcode);
         res.response.magic = PROTOCOL_BINARY_RES;
         res.response.opcode = req->request.opcode;
         res.response.keylen = 0;
@@ -384,6 +444,19 @@ handle_packet(client_t *cl, char *buf)
     }
 }
 
+/* this callback called by the IO backend, when required event on the
+ * client socket occurs.
+ *
+ * for LCB_READ_EVENT it tries to read from the socket until it get
+ * EWOULDBLOCK error, which means that there no available data in the
+ * kernel buffer and the operation need to block until data will be
+ * transmitted. if the read operation returns the data, it ensure that
+ * the buffer aligned, and have at least one packet, and pass to
+ * handle_packet() function.
+ *
+ * for LCB_WRITE_EVENT it just sends the output buffer to the client,
+ * if it isn't empty
+ */
 void
 proxy_client_callback(lcb_socket_t sock, short which, void *data)
 {
@@ -394,7 +467,8 @@ proxy_client_callback(lcb_socket_t sock, short which, void *data)
 
     io = cl->server->io;
     if (which & LCB_READ_EVENT) {
-        while (1) {
+        for (;;) {
+            /* read in chunks of BUFFER_SIZE */
             ringbuffer_ensure_capacity(&cl->in, BUFFER_SIZE);
             ringbuffer_get_iov(&cl->in, RINGBUFFER_WRITE, iov);
             rv = io->v.v0.recvv(io, cl->sock, iov, 2);
@@ -412,42 +486,55 @@ proxy_client_callback(lcb_socket_t sock, short which, void *data)
                     fail("read error");
                 }
             } else if (rv == 0) {
+                /* end of stream */
                 io->v.v0.destroy_event(io, cl->event);
                 ringbuffer_destruct(&cl->in);
                 ringbuffer_destruct(&cl->out);
+                close(cl->sock);
+                info("[%d] disconnected", cl->id);
                 free(cl);
-                info("[%p] disconnected", (void *)cl);
                 return;
             } else {
-                protocol_binary_request_header req;
-                lcb_size_t nr, sz;
-                char *buf;
-
                 ringbuffer_produced(&cl->in, rv);
-                if (ringbuffer_ensure_alignment(&cl->in) != 0) {
-                    fail("cannot align the buffer");
+
+                for (;;) {
+                    protocol_binary_request_header req;
+                    lcb_size_t nr, sz;
+                    char *buf;
+
+                    /* make sure the buffer is aligned */
+                    if (ringbuffer_ensure_alignment(&cl->in) != 0) {
+                        fail("cannot align the buffer");
+                    }
+                    /* take the packet header from the buffer */
+                    nr = ringbuffer_peek(&cl->in, req.bytes, sizeof(req));
+                    if (nr < sizeof(req)) {
+                        break;
+                    }
+                    /* make sure the buffer has whole the body */
+                    sz = ntohl(req.request.bodylen) + sizeof(req);
+                    if (cl->in.nbytes < sz) {
+                        break;
+                    }
+                    /* copy packet into intermediate buffer */
+                    buf = malloc(sizeof(char) * sz);
+                    if (buf == NULL) {
+                        fail("cannot allocate buffer for packet");
+                    }
+                    nr = ringbuffer_read(&cl->in, buf, sz);
+                    if (nr < sizeof(req)) {
+                        fail("input buffer doesn't contain enough data");
+                    }
+                    /* handle packet and deallocate the intermediate
+                     * buffer */
+                    handle_packet(cl, buf);
+                    free(buf);
                 }
-                nr = ringbuffer_peek(&cl->in, req.bytes, sizeof(req));
-                if (nr < sizeof(req)) {
-                    continue;
-                }
-                sz = ntohl(req.request.bodylen) + sizeof(req);
-                if (cl->in.nbytes < sz) {
-                    continue;
-                }
-                buf = malloc(sizeof(char) * sz);
-                if (buf == NULL) {
-                    fail("cannot allocate buffer for packet");
-                }
-                nr = ringbuffer_read(&cl->in, buf, sz);
-                if (nr < sizeof(req)) {
-                    fail("input buffer doesn't contain enough data");
-                }
-                handle_packet(cl, buf);
             }
         }
     }
     if (which & LCB_WRITE_EVENT) {
+        /* check if we have something to send */
         ringbuffer_get_iov(&cl->out, RINGBUFFER_READ, iov);
         if (iov[0].iov_len + iov[1].iov_len == 0) {
             io->v.v0.delete_event(io, cl->sock, cl->event);
@@ -460,8 +547,9 @@ proxy_client_callback(lcb_socket_t sock, short which, void *data)
             io->v.v0.destroy_event(io, cl->event);
             ringbuffer_destruct(&cl->in);
             ringbuffer_destruct(&cl->out);
+            close(cl->sock);
+            info("[%d] disconnected", cl->id);
             free(cl);
-            info("write: peer disconnected");
             return;
         } else {
             ringbuffer_consumed(&cl->out, rv);
@@ -473,6 +561,10 @@ proxy_client_callback(lcb_socket_t sock, short which, void *data)
     (void)sock;
 }
 
+/* this callback is called when proxy socket is ready to accept
+ * clients. it is in charge of allocating new client structure, making
+ * its socket non-blocking and register read event to receive commands
+ */
 void
 proxy_accept_callback(lcb_socket_t sock, short which, void *data)
 {
@@ -498,6 +590,7 @@ proxy_accept_callback(lcb_socket_t sock, short which, void *data)
         fail("failed to allocate output buffer for client");
     }
     naddr = sizeof(addr);
+    cl->id = ++id;
     cl->server = sv;
     cl->sock = accept((int)sock, (struct sockaddr *)&addr, &naddr);
     if (cl->sock == -1) {
@@ -513,11 +606,13 @@ proxy_accept_callback(lcb_socket_t sock, short which, void *data)
     if (cl->event == NULL) {
         fail("failed to create event for client");
     }
-    info("[%p] connected", (void *)cl);
+    info("[%d] connected", cl->id);
     io->v.v0.update_event(io, cl->sock, cl->event, LCB_READ_EVENT, cl,
                           proxy_client_callback);
 }
 
+/* this is main proxy function, which prepares listening socket and
+ * run IO loop */
 void
 run_proxy(lcb_t conn)
 {
@@ -552,9 +647,9 @@ run_proxy(lcb_t conn)
     }
     io->v.v0.update_event(io, sock, server.event, LCB_READ_EVENT,
                           &server, proxy_accept_callback);
-
     lcb_set_error_callback(conn, error_callback);
     lcb_set_get_callback(conn, get_callback);
     lcb_set_store_callback(conn, store_callback);
+    info("use ctrl-c to stop");
     io->v.v0.run_event_loop(io);
 }
