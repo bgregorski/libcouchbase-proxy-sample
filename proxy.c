@@ -37,8 +37,7 @@
 struct lcb_create_st opts;
 int port;
 
-void
-info(const char *fmt, ...)
+void info(const char *fmt, ...)
 {
     va_list args;
 
@@ -48,8 +47,7 @@ info(const char *fmt, ...)
     fprintf(stderr, "\n");
 }
 
-void
-fail(const char *fmt, ...)
+void fail(const char *fmt, ...)
 {
     va_list args;
 
@@ -60,8 +58,7 @@ fail(const char *fmt, ...)
     exit(EXIT_FAILURE);
 }
 
-void
-fail_e(lcb_error_t err, const char *fmt, ...)
+void fail_e(lcb_error_t err, const char *fmt, ...)
 {
     int en = errno;
     va_list args;
@@ -92,8 +89,7 @@ void usage(void)
 
 }
 
-void
-scan_options(int argc, char *argv[])
+void scan_options(int argc, char *argv[])
 {
     struct lcb_create_io_ops_st io_opts;
     lcb_error_t err;
@@ -158,8 +154,7 @@ scan_options(int argc, char *argv[])
 
 void run_proxy(lcb_t conn);
 
-int
-main(int argc, char *argv[])
+int main(int argc, char *argv[])
 {
     lcb_error_t err;
     lcb_t conn = NULL;
@@ -238,16 +233,14 @@ struct cookie_st {
 
 /* this callback triggered when libcouchbase detects an error, but
  * cannot associate it with specific request. e.g. network issues */
-void
-error_callback(lcb_t conn, lcb_error_t err, const char *info)
+void error_callback(lcb_t conn, lcb_error_t err, const char *info)
 {
     fail_e(err, info);
     (void)conn;
 }
 
 /* libcouchbase error codes to memcached protocol */
-protocol_binary_response_status
-map_status(lcb_error_t err)
+protocol_binary_response_status map_status(lcb_error_t err)
 {
     switch (err) {
     case LCB_SUCCESS:
@@ -290,9 +283,8 @@ map_status(lcb_error_t err)
 /* this callback called for each GET request. it transform response
  * returned by libcouchbase to protocol packet and notify IO loop that
  * the data in the buffer is ready to be sent to the network */
-void
-get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
-             const lcb_get_resp_t *item)
+void get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
+                  const lcb_get_resp_t *item)
 {
     cookie_t *c = (cookie_t *)cookie;
     client_t *cl = c->client;
@@ -321,11 +313,10 @@ get_callback(lcb_t conn, const void *cookie, lcb_error_t err,
 /* this callback called for each SET request. it transform response
  * returned by libcouchbase to protocol packet and notify IO loop that
  * the data in the buffer is ready to be sent to the network */
-void
-store_callback(lcb_t conn, const void *cookie,
-               lcb_storage_t operation,
-               lcb_error_t err,
-               const lcb_store_resp_t *item)
+void store_callback(lcb_t conn, const void *cookie,
+                    lcb_storage_t operation,
+                    lcb_error_t err,
+                    const lcb_store_resp_t *item)
 {
     cookie_t *c = (cookie_t *)cookie;
     client_t *cl = c->client;
@@ -361,8 +352,7 @@ char version_msg[] = "proxy/libcouchbase";
  * known commands and makes corresponding calls to libcouchbase. for
  * all unknown commands it outputs response with code
  * PROTOCOL_BINARY_RESPONSE_NOT_SUPPORTED */
-void
-handle_packet(client_t *cl, char *buf)
+void handle_packet(client_t *cl, char *buf)
 {
     protocol_binary_request_header *req = (void *)buf;
     protocol_binary_response_header res;
@@ -391,7 +381,7 @@ handle_packet(client_t *cl, char *buf)
         cmd.get.v.v0.key = buf + sizeof(*req);
         info("[%d] get \"%.*s\"", cl->id,
              (int)cmd.get.v.v0.nkey, (char *)cmd.get.v.v0.key);
-        lcb_get(cl->server->conn, (const void*)cookie, 1, cmds.get);
+        lcb_get(cl->server->conn, (const void *)cookie, 1, cmds.get);
         break;
     case PROTOCOL_BINARY_CMD_SET:
         cmds.set[0] = &cmd.set;
@@ -408,7 +398,7 @@ handle_packet(client_t *cl, char *buf)
         cmd.set.v.v0.exptime = ntohl(cmd.set.v.v0.exptime);
         info("[%d] set \"%.*s\"", cl->id,
              (int)cmd.set.v.v0.nkey, (char *)cmd.set.v.v0.key);
-        lcb_store(cl->server->conn, (const void*)cookie, 1, cmds.set);
+        lcb_store(cl->server->conn, (const void *)cookie, 1, cmds.set);
         break;
     case PROTOCOL_BINARY_CMD_VERSION:
         free(cookie);
@@ -457,8 +447,7 @@ handle_packet(client_t *cl, char *buf)
  * for LCB_WRITE_EVENT it just sends the output buffer to the client,
  * if it isn't empty
  */
-void
-proxy_client_callback(lcb_socket_t sock, short which, void *data)
+void proxy_client_callback(lcb_socket_t sock, short which, void *data)
 {
     struct lcb_iovec_st iov[2];
     ssize_t rv;
@@ -565,8 +554,7 @@ proxy_client_callback(lcb_socket_t sock, short which, void *data)
  * clients. it is in charge of allocating new client structure, making
  * its socket non-blocking and register read event to receive commands
  */
-void
-proxy_accept_callback(lcb_socket_t sock, short which, void *data)
+void proxy_accept_callback(lcb_socket_t sock, short which, void *data)
 {
     server_t *sv = data;
     client_t *cl;
@@ -613,8 +601,7 @@ proxy_accept_callback(lcb_socket_t sock, short which, void *data)
 
 /* this is main proxy function, which prepares listening socket and
  * run IO loop */
-void
-run_proxy(lcb_t conn)
+void run_proxy(lcb_t conn)
 {
     lcb_io_opt_t io;
     struct sockaddr_in addr;
